@@ -1,0 +1,7 @@
+instahyre:
+  username: ${INSTAHYRE_USERNAME}
+  password: ${INSTAHYRE_PASSWORD}
+  keywords:
+    - Java
+    - Springboot
+    - Spring Boot
