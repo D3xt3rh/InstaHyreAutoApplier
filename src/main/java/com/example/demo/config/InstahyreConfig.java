@@ -13,4 +13,9 @@ public class InstahyreConfig {
     private String username;
     private String password;
     private List<String> keywords;
+
+    // Cookie-based auth
+    private String sessionid;
+    private String csrftoken;
+    private boolean useManualCookies = false;
 }

@@ -1,7 +1,52 @@
+# application.yml
+
 instahyre:
-  username: ${INSTAHYRE_USERNAME}
-  password: ${INSTAHYRE_PASSWORD}
+  # Your LinkedIn/Instahyre credentials
+  username: your-email@example.com
+  password: your-password
+  
+  # Keywords to match for auto-applying
   keywords:
     - Java
-    - Springboot
     - Spring Boot
+    - Microservices
+    - REST API
+    - MySQL
+    - PostgreSQL
+    - Docker
+    - Kubernetes
+    - AWS
+    - React
+  
+  # Manual Cookie Authentication (RECOMMENDED - see MANUAL_COOKIE_LOGIN_GUIDE.md)
+  # Set use-manual-cookies to true and provide your session cookies
+  # This bypasses the automated login which is currently failing
+  use-manual-cookies: true  # Change to true to use cookies
+  sessionid: ""  # Paste your sessionid cookie value here
+  csrftoken: ""  # Paste your csrftoken cookie value here
+
+spring:
+  application:
+    name: instahyre-auto-applier
+
+# Enable scheduling for auto-applier
+spring.task.scheduling.enabled: true
+
+# Logging configuration
+logging:
+  level:
+    com.example.demo: INFO
+    org.openqa.selenium: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+
+# Example with manual cookies enabled:
+# instahyre:
+#   username: john.doe@example.com
+#   password: mypassword
+#   keywords:
+#     - Java
+#     - Spring Boot
+#   use-manual-cookies: true
+#   sessionid: "s%3Ajzx9F7nK4mL2pQ8rT5vW1yX6dC3hB0gE.Ab12Cd34Ef56Gh78Ij90..."
+#   csrftoken: "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"
