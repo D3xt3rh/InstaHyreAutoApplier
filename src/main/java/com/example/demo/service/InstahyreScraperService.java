@@ -11,25 +11,18 @@ import lombok.extern.slf4j.Slf4j;
 import org.openqa.selenium.*;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.chrome.ChromeOptions;
-import org.openqa.selenium.support.ui.ExpectedConditions;
-import org.openqa.selenium.support.ui.WebDriverWait;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
 import java.io.File;
 import java.nio.file.Files;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class InstahyreScraperService {
-
     private final InstahyreConfig config;
     @Getter
     private WebDriver driver;
@@ -126,7 +119,7 @@ public class InstahyreScraperService {
             takeScreenshot("cookie-login-result");
 
             // Check if we're still on login page (login failed)
-            if (currentUrl.contains("login")) {
+            if (Objects.requireNonNull(currentUrl).contains("login")) {
                 log.error("❌ Still on login page - cookies are invalid or expired");
                 log.error("Page title: {}", driver.getTitle());
 
@@ -178,7 +171,6 @@ public class InstahyreScraperService {
                 String fileName = name + "-" + System.currentTimeMillis() + ".png";
                 String path = "screenshots/" + fileName;
                 File destFile = new File(path);
-                destFile.getParentFile().mkdirs();
                 Files.copy(screenshot.toPath(), destFile.toPath());
                 log.info("📸 Screenshot saved: {}", path);
             }
@@ -195,18 +187,14 @@ public class InstahyreScraperService {
         try {
             log.info("=== SCRAPING JOBS ===");
 
-            // Get cookies from Selenium
             Map<String, String> cookieMap = driver.manage().getCookies().stream()
                     .collect(Collectors.toMap(Cookie::getName, Cookie::getValue));
-
-            log.info("Using {} cookies for API request", cookieMap.size());
 
             String cookieHeader = cookieMap.entrySet().stream()
                     .map(e -> e.getKey() + "=" + e.getValue())
                     .collect(Collectors.joining("; "));
 
             String csrfToken = cookieMap.getOrDefault("csrftoken", "");
-            log.info("CSRF token present: {}", !csrfToken.isEmpty());
 
             RestClient restClient = RestClient.builder()
                     .baseUrl("https://www.instahyre.com")
@@ -214,74 +202,97 @@ public class InstahyreScraperService {
                     .defaultHeader("x-csrftoken", csrfToken)
                     .defaultHeader("accept", "application/json, text/plain, */*")
                     .defaultHeader("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
-                    .defaultHeader("referer", "https://www.instahyre.com/candidate/opportunities")
+                    .defaultHeader("referer", "https://www.instahyre.com/candidate/opportunities/?matching=true")
+                    .defaultHeader("origin", "https://www.instahyre.com")
                     .build();
 
-            log.info("Making API request to fetch jobs...");
             List<JobDTO> allJobs = new ArrayList<>();
-            String url = "/api/v1/candidate_opportunity?limit=30";
+            int offset = 0;
+            int limit = 30;
+            boolean hasMore = true;
 
-            while (url != null) {
-                log.info("Fetching page: {}", url);
+            while (hasMore) {
+                String url = String.format(
+                        "/api/v1/candidate_opportunity?company_size=&industry_type=&interest_facet=0&job_type=&limit=%d&location=&offset=%d",
+                        limit, offset
+                );
+
+                log.info("Fetching page at offset {}: {}", offset, url);
+
                 String json = restClient.get()
                         .uri(url)
                         .retrieve()
                         .body(String.class);
 
-                log.info("API response received, parsing JSON...");
                 ObjectMapper mapper = new ObjectMapper();
                 JsonNode root = mapper.readTree(json);
 
-                // Try both 'results' and 'objects' fields (API format can vary)
-                JsonNode jobsNode = root.get("results");
-                if (jobsNode == null) {
-                    jobsNode = root.get("objects");
+                if (offset == 0) {
+                    log.info("Response preview: {}", Objects.requireNonNull(json).substring(0, Math.min(300, json.length())));
                 }
 
-                if (jobsNode == null) {
-                    log.error("No 'results' or 'objects' field in API response");
-                    log.error("Response preview: {}", json.substring(0, Math.min(500, json.length())));
+                JsonNode jobsNode = root.get("results");
+                if (jobsNode == null) jobsNode = root.get("objects");
+
+                if (jobsNode == null || !jobsNode.isArray() || jobsNode.isEmpty()) {
+                    log.info("No more jobs found at offset {}", offset);
                     break;
                 }
 
+                int pageCount = 0; // ✅ reset per page
                 for (JsonNode opp : jobsNode) {
                     try {
+                        // ✅ correct fields for candidate_opportunity API
                         String opportunityId = opp.get("id").asText();
                         String company = opp.get("employer").get("company_name").asText();
-                        String titleText = opp.get("job").get("candidate_title").asText();
-                        String fullTitle = company + " - " + titleText;
+                        String title = opp.get("job").get("candidate_title").asText();
 
                         List<String> skills = new ArrayList<>();
                         JsonNode keywords = opp.get("job").get("keywords");
                         if (keywords != null && keywords.isArray()) {
-                            for (JsonNode kw : keywords) {
-                                skills.add(kw.asText());
-                            }
+                            for (JsonNode kw : keywords) skills.add(kw.asText());
                         }
 
-                        JobDTO job = JobDTO.builder()
-                                .id(opportunityId)
-                                .title(fullTitle)
+                        JobDTO jobDTO = JobDTO.builder()
+                                .id(opportunityId)   // ✅ opportunity id e.g. "5850809550"
+                                .jobId(null)         // ✅ null for opportunity jobs
+                                .title(company + " - " + title)
                                 .company(company)
                                 .skills(skills)
+                                .source("opportunity") // ✅ correct source
                                 .build();
-                        allJobs.add(job);
+
+                        allJobs.add(jobDTO);
+                        pageCount++; // ✅ increment count
+
                     } catch (Exception e) {
-                        log.warn("Failed to parse job opportunity", e);
+                        log.warn("Failed to parse opportunity: {}", e.getMessage());
                     }
                 }
 
-                // Check for next page
-                JsonNode next = root.get("next");
-                if (next != null && !next.isNull()) {
-                    String nextUrl = next.asText();
-                    url = nextUrl.replace("https://www.instahyre.com", "");
+                log.info("Page offset={} fetched {} jobs (total so far: {})", offset, pageCount, allJobs.size());
+
+                // ✅ pagination logic
+                JsonNode nextNode = root.get("next");
+                JsonNode totalNode = root.get("count");
+
+                if (totalNode != null) {
+                    int total = totalNode.asInt();
+                    log.info("Total jobs available: {}", total);
+                    offset += limit;
+                    hasMore = offset < total;
+                } else if (nextNode != null && !nextNode.isNull() && !nextNode.asText().isEmpty()) {
+                    offset += limit;
+                    // ✅ was missing before
                 } else {
-                    url = null;
+                    hasMore = pageCount == limit; // ✅ try next page if full page returned
+                    offset += limit;
                 }
+
+                Thread.sleep(1000);
             }
 
-            log.info("✅ Successfully scraped {} jobs", allJobs.size());
+            log.info("✅ Successfully scraped {} total jobs", allJobs.size());
             return allJobs;
 
         } catch (Exception e) {
@@ -290,104 +301,216 @@ public class InstahyreScraperService {
         }
     }
 
+    public List<JobDTO> scrapeJobSearch() {
+        if (!config.getJobSearch().isEnabled()) {
+            log.info("Job search scraping is disabled");
+            return new ArrayList<>();
+        }
+
+        try {
+            log.info("=== SCRAPING JOB SEARCH ===");
+
+            Map<String, String> cookieMap = driver.manage().getCookies().stream()
+                    .collect(Collectors.toMap(Cookie::getName, Cookie::getValue));
+
+            String cookieHeader = cookieMap.entrySet().stream()
+                    .map(e -> e.getKey() + "=" + e.getValue())
+                    .collect(Collectors.joining("; "));
+
+            String csrfToken = cookieMap.getOrDefault("csrftoken", "");
+
+            RestClient restClient = RestClient.builder()
+                    .baseUrl("https://www.instahyre.com")
+                    .defaultHeader("Cookie", cookieHeader)
+                    .defaultHeader("x-csrftoken", csrfToken)
+                    .defaultHeader("accept", "application/json, text/plain, */*")
+                    .defaultHeader("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+                    .defaultHeader("referer", "https://www.instahyre.com/candidate/opportunities/?matching=true")
+                    .defaultHeader("origin", "https://www.instahyre.com")
+                    .build();
+
+            // ✅ Exact URL from browser — guaranteed to work
+            String baseParams = "company_size=0" +
+                    "&jobLocations=Work+From+Home" +
+                    "&jobLocations=North+India" +
+                    "&jobLocations=Delhi+%2F+NCR" +
+                    "&jobLocations=Dubai" +
+                    "&jobLocations=United+Arab+Emirates+(UAE)" +
+                    "&jobLocations=Qatar" +
+                    "&jobLocations=Saudi+Arabia" +
+                    "&jobLocations=Oman" +
+                    "&jobLocations=Anywhere+in+Uttar+Pradesh" +
+                    "&jobLocations=Bangalore" +
+                    "&jobLocations=Hyderabad" +
+                    "&job_functions=10" +
+                    "&job_type=0" +
+                    "&skills=Java" +
+                    "&skills=Data+Structures" +
+                    "&skills=Spring+Boot" +
+                    "&skills=AWS" +
+                    "&skills=J2EE" +
+                    "&skills=MySQL" +
+                    "&skills=Kafka" +
+                    "&skills=Redis" +
+                    "&skills=SQL" +
+                    "&skills=Spring" +
+                    "&skills=Docker" +
+                    "&skills=Kubernetes" +
+                    "&status=0" +
+                    "&years=3";
+
+            List<JobDTO> allJobs = new ArrayList<>();
+            int offset = 0;
+            int limit = 30;
+            boolean hasMore = true;
+
+            while (hasMore) {
+                String url = "/api/v1/job_search?" + baseParams +
+                        "&limit=" + limit + "&offset=" + offset;
+                log.info("Fetching job_search at offset {}", offset);
+
+                String json = restClient.get()
+                        .uri(url)
+                        .retrieve()
+                        .body(String.class);
+
+                ObjectMapper mapper = new ObjectMapper();
+                JsonNode root = mapper.readTree(json);
+
+                if (offset == 0) {
+                    log.info("job_search preview: {}",
+                            Objects.requireNonNull(json).substring(0, Math.min(500, json.length())));
+                }
+
+                JsonNode jobsNode = root.get("objects");
+                if (jobsNode == null) jobsNode = root.get("results");
+
+                if (jobsNode == null || !jobsNode.isArray() || jobsNode.isEmpty()) {
+                    log.info("No more job_search results at offset {}", offset);
+                    break;
+                }
+
+                int pageCount = 0;
+                for (JsonNode opp : jobsNode) {
+                    try {
+                        String jobId = opp.get("job").get("id").asText();
+                        String company = opp.get("employer").get("company_name").asText();
+                        String title = opp.get("job").get("candidate_title").asText();
+
+                        List<String> skills = new ArrayList<>();
+                        JsonNode keywords = opp.get("job").get("keywords");
+                        if (keywords != null && keywords.isArray()) {
+                            for (JsonNode kw : keywords) skills.add(kw.asText());
+                        }
+
+                        JobDTO jobDTO = JobDTO.builder()
+                                .id(null)
+                                .jobId(jobId)
+                                .title(company + " - " + title)
+                                .company(company)
+                                .skills(skills)
+                                .source("job_search")
+                                .build();
+
+                        allJobs.add(jobDTO);
+                        pageCount++;
+
+                    } catch (Exception e) {
+                        log.warn("Failed to parse job_search result: {}", e.getMessage());
+                    }
+                }
+
+                log.info("job_search offset={} fetched {} jobs (total: {})",
+                        offset, pageCount, allJobs.size());
+
+                JsonNode nextNode = root.get("next");
+                JsonNode totalNode = root.get("count");
+
+                if (totalNode != null) {
+                    int total = totalNode.asInt();
+                    log.info("Total job_search available: {}", total);
+                    offset += limit;
+                    hasMore = offset < total;
+                } else if (nextNode != null && !nextNode.isNull() && !nextNode.asText().isEmpty()) {
+                    offset += limit;
+                } else {
+                    hasMore = pageCount == limit;
+                    offset += limit;
+                }
+
+                Thread.sleep(1000);
+            }
+
+            log.info("✅ job_search scraped {} total jobs", allJobs.size());
+            return allJobs;
+
+        } catch (Exception e) {
+            log.error("❌ Error in scrapeJobSearch", e);
+            return new ArrayList<>();
+        }
+    }
     public boolean applyToJob(JobDTO job) {
         try {
             log.info("Attempting to apply to job: {} (ID: {})", job.getTitle(), job.getId());
 
-            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+            Map<String, String> cookieMap = driver.manage().getCookies().stream()
+                    .collect(Collectors.toMap(Cookie::getName, Cookie::getValue));
 
-            // Navigate to the job page
-            driver.get("https://www.instahyre.com/job/" + job.getId());
-            wait.until(ExpectedConditions.presenceOfElementLocated(By.tagName("body")));
+            String cookieHeader = cookieMap.entrySet().stream()
+                    .map(e -> e.getKey() + "=" + e.getValue())
+                    .collect(Collectors.joining("; "));
 
-            // Try to find and click the apply button
-            boolean clicked = false;
+            String csrfToken = cookieMap.getOrDefault("csrftoken", "");
 
-            // Strategy 1: Button with text "Apply"
-            try {
-                WebElement applyButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//button[contains(text(), 'Apply')]")));
-                applyButton.click();
-                clicked = true;
-                log.info("Clicked apply button for job: {}", job.getTitle());
-            } catch (Exception e1) {
-                log.debug("Strategy 1 failed for job '{}': {}", job.getTitle(), e1.getMessage());
-                try {
-                    // Log all buttons on the page for debugging
-                    List<WebElement> allButtons = driver.findElements(By.tagName("button"));
-                    log.info("Found {} buttons on page for job '{}':", allButtons.size(), job.getTitle());
-                    for (int i = 0; i < Math.min(allButtons.size(), 10); i++) {
-                        WebElement btn = allButtons.get(i);
-                        log.info("Button {}: text='{}', class='{}', id='{}'", i, btn.getText(), btn.getAttribute("class"), btn.getAttribute("id"));
-                    }
-                } catch (Exception logE) {
-                    log.warn("Could not log buttons: {}", logE.getMessage());
-                }
-            }
+            RestClient restClient = RestClient.builder()
+                    .baseUrl("https://www.instahyre.com")
+                    .defaultHeader("Cookie", cookieHeader)
+                    .defaultHeader("x-csrftoken", csrfToken)
+                    .defaultHeader("accept", "application/json, text/plain, */*")
+                    .defaultHeader("content-type", "application/json")
+                    .defaultHeader("origin", "https://www.instahyre.com")
+                    .defaultHeader("referer", "https://www.instahyre.com/candidate/opportunities/?matching=true")
+                    .defaultHeader("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+                    .build();
 
-            if (!clicked) {
-                // Strategy 2: Button with text "Apply Now"
-                try {
-                    WebElement applyButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//button[contains(text(), 'Apply Now')]")));
-                    applyButton.click();
-                    clicked = true;
-                    log.info("Clicked 'Apply Now' button for job: {}", job.getTitle());
-                } catch (Exception e2) {
-                    log.debug("Strategy 2 failed for job '{}': {}", job.getTitle(), e2.getMessage());
-                }
-            }
-
-            if (!clicked) {
-                // Strategy 3: Any button containing 'Apply' case insensitive
-                try {
-                    WebElement applyButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]")));
-                    applyButton.click();
-                    clicked = true;
-                    log.info("Clicked apply button (case insensitive) for job: {}", job.getTitle());
-                } catch (Exception e3) {
-                    log.debug("Strategy 3 failed for job '{}': {}", job.getTitle(), e3.getMessage());
-                }
-            }
-
-            if (!clicked) {
-                // Strategy 4: Link with text containing 'Apply'
-                try {
-                    WebElement applyLink = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//a[contains(text(), 'Apply') or contains(@href, 'apply')]")));
-                    applyLink.click();
-                    clicked = true;
-                    log.info("Clicked apply link for job: {}", job.getTitle());
-                } catch (Exception e4) {
-                    log.debug("Strategy 4 failed for job '{}': {}", job.getTitle(), e4.getMessage());
-                }
-            }
-
-            // If clicked, wait for modal or confirmation
-            if (clicked) {
-                try {
-                    // Wait for modal to appear and click final apply
-                    WebElement finalApplyButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//button[contains(text(), 'Apply') and contains(@class, 'btn-success')]")));
-                    finalApplyButton.click();
-                    log.info("Clicked final apply button");
-
-                    // Wait for modal to close
-                    wait.until(ExpectedConditions.invisibilityOfElementLocated(By.cssSelector(".application-modal-backdrop")));
-                    log.info("Modal closed after apply");
-                } catch (Exception e) {
-                    log.warn("Could not complete apply process for job '{}': {}", job.getTitle(), e.getMessage());
-                    takeScreenshot("apply_error_" + job.getTitle().replaceAll("[^a-zA-Z0-9]", "_"));
-                    return false;
-                }
+            // Build payload based on source
+            Map<String, Object> body;
+            if ("job_search".equals(job.getSource())) {
+                // job_search payload: id=null, job_id=numeric
+                body = new HashMap<>();
+                body.put("id", null);
+                body.put("is_interested", true);
+                body.put("is_activity_page_job", false);
+                body.put("job_id", Long.parseLong(job.getJobId()));
             } else {
-                log.warn("Could not find apply button for job: {}", job.getTitle());
-                takeScreenshot("no_apply_button_" + job.getTitle().replaceAll("[^a-zA-Z0-9]", "_"));
-                return false;
+                // opportunity payload: id=string, no job_id
+                body = new HashMap<>();
+                body.put("id", job.getId());
+                body.put("is_interested", true);
+                body.put("is_activity_page_job", false);
             }
 
-            log.info("Successfully applied to: {} (Total applied: ?)", job.getTitle());
+            log.info("Applying with payload: {}", body);
+
+            String response = restClient.post()
+                    .uri("/api/v1/candidate_opportunity/apply")
+                    .body(body)
+                    .retrieve()
+                    .body(String.class);
+
+            log.info("✅ Applied to: {} | Response: {}", job.getTitle(), response);
             return true;
 
+        } catch (org.springframework.web.client.HttpClientErrorException e) {
+            String responseBody = e.getResponseBodyAsString();
+            if (e.getStatusCode().value() == 400 && responseBody.contains("already applied")) {
+                log.info("⏭️ Already applied to: {}", job.getTitle());
+                return false;
+            }
+            log.error("❌ Failed to apply to: {} - {} - {}", job.getTitle(), e.getStatusCode(), responseBody);
+            return false;
         } catch (Exception e) {
-            log.error("❌ Failed to apply to job: {}", job.getTitle(), e.getMessage());
-            takeScreenshot("apply_failure_" + job.getTitle().replaceAll("[^a-zA-Z0-9]", "_"));
+            log.error("❌ Failed to apply to: {} - {}", job.getTitle(), e.getMessage());
             return false;
         }
     }

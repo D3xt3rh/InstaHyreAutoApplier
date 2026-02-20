@@ -8,6 +8,9 @@ import java.util.List;
 @Data
 @Builder
 public class JobDTO {
+    @Builder.Default
+    private String source = "opportunity"; // "opportunity" or "job_search"
+    private String jobId; // only for job_search (numeric, e.g. "411859")
     private String id; // Opportunity ID from API
     private String title;
     private String company;
