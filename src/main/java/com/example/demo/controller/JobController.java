@@ -1,5 +1,6 @@
 package com.example.demo.controller;
 
+import com.example.demo.config.InstahyreConfig;
 import com.example.demo.dto.JobDTO;
 import com.example.demo.service.AutoApplierService;
 import com.example.demo.service.InstahyreScraperService;
@@ -20,6 +21,7 @@ public class JobController {
 
     private final AutoApplierService autoApplierService;
     private final InstahyreScraperService scraperService;
+    private final InstahyreConfig config;
 
     /**
      * Get all available jobs from Instahyre
@@ -28,7 +30,27 @@ public class JobController {
     public ResponseEntity<?> getJobs() {
         try {
             scraperService.initDriver();
-            scraperService.login();
+
+            // Use cookie-based login
+            if (config.isUseManualCookies()) {
+                if (config.getSessionid() == null || config.getCsrftoken() == null) {
+                    Map<String, Object> error = new HashMap<>();
+                    error.put("success", false);
+                    error.put("error", "Cookie-based auth enabled but cookies are missing. Please add sessionid and csrftoken to application.yml");
+                    return ResponseEntity.badRequest().body(error);
+                }
+
+                scraperService.loginWithManualCookies(
+                        config.getSessionid(),
+                        config.getCsrftoken()
+                );
+            } else {
+                Map<String, Object> error = new HashMap<>();
+                error.put("success", false);
+                error.put("error", "Automatic login is not supported. Please enable cookie-based authentication in application.yml (set use-manual-cookies: true)");
+                return ResponseEntity.badRequest().body(error);
+            }
+
             List<JobDTO> jobs = scraperService.scrapeJobs();
 
             Map<String, Object> response = new HashMap<>();

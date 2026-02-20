@@ -35,33 +35,44 @@ public class AutoApplierService {
         try {
             scraperService.initDriver();
 
-            // Check if we should use manual cookies or automatic login
-            if (config.isUseManualCookies()) {
-                if (config.getSessionid() == null || config.getCsrftoken() == null) {
-                    log.error("Manual cookies enabled but sessionid or csrftoken is missing!");
-                    log.error("Please add 'sessionid' and 'csrftoken' to your application.yml");
-                    log.error("See MANUAL_COOKIE_LOGIN_GUIDE.md for instructions");
-                    return appliedJobs;
-                }
-
-                log.info("Using manual cookie-based authentication");
-                scraperService.loginWithManualCookies(
-                        config.getSessionid(),
-                        config.getCsrftoken()
-                );
-            } else {
-                log.info("Using automatic login");
-                scraperService.login();
+            // Check if manual cookies are enabled
+            if (!config.isUseManualCookies()) {
+                log.error("❌ Automatic login is not supported!");
+                log.error("Please enable cookie-based authentication:");
+                log.error("1. Set 'use-manual-cookies: true' in application.yml");
+                log.error("2. Add 'sessionid' and 'csrftoken' values");
+                log.error("3. See GET_FRESH_COOKIES_GUIDE.md for instructions");
+                return appliedJobs;
             }
 
-            List<JobDTO> jobs = scraperService.scrapeJobs();
-            log.info("Found {} total jobs", jobs.size());
+            // Check if cookies are provided
+            if (config.getSessionid() == null || config.getCsrftoken() == null) {
+                log.error("❌ Manual cookies enabled but sessionid or csrftoken is missing!");
+                log.error("Please add 'sessionid' and 'csrftoken' to your application.yml");
+                log.error("See GET_FRESH_COOKIES_GUIDE.md for instructions");
+                return appliedJobs;
+            }
 
-            int matchedCount = 0;
+            log.info("Using manual cookie-based authentication");
+            scraperService.loginWithManualCookies(
+                    config.getSessionid(),
+                    config.getCsrftoken()
+            );
+
+            List<JobDTO> allJobs = scraperService.scrapeJobs();
+            log.info("Found {} total jobs", allJobs.size());
+
+            List<JobDTO> matched = allJobs.stream().filter(this::matchesKeywords).toList();
+            log.info("Found {} matched jobs", matched.size());
+
             int appliedCount = 0;
             int skippedCount = 0;
 
-            for (JobDTO job : jobs) {
+            // Navigate to opportunities page once (not needed now, but keep for login check)
+            // scraperService.getDriver().get("https://www.instahyre.com/candidate/opportunities");
+            // Thread.sleep(2000); // Wait for page load
+
+            for (JobDTO job : matched) {
                 try {
                     if (appliedJobIds.contains(job.getId())) {
                         log.info("Skipping already applied job: {}", job.getTitle());
@@ -69,32 +80,26 @@ public class AutoApplierService {
                         continue;
                     }
 
-                    if (matchesKeywords(job)) {
-                        matchedCount++;
-                        log.info("Job matches keywords: {} (Skills: {})",
-                                job.getTitle(), String.join(", ", job.getSkills()));
+                    boolean success = scraperService.applyToJob(job);
 
-                        boolean success = scraperService.applyToJob(job);
-
-                        if (success) {
-                            appliedCount++;
-                            job.setApplied(true);
-                            appliedJobs.add(job);
-                            appliedJobIds.add(job.getId());
-                            log.info("Successfully applied to: {}", job.getTitle());
-                        } else {
-                            log.warn("Failed to apply to: {}", job.getTitle());
-                        }
-
-                        Thread.sleep(3000);
+                    if (success) {
+                        appliedCount++;
+                        job.setApplied(true);
+                        appliedJobs.add(job);
+                        appliedJobIds.add(job.getId());
+                        log.info("Successfully applied to: {} (Total applied: {})", job.getTitle(), appliedCount);
+                    } else {
+                        log.warn("Failed to apply to: {}", job.getTitle());
                     }
+
+                    Thread.sleep(3000); // Delay between applications
                 } catch (Exception e) {
                     log.error("Error processing job: {}", job.getTitle(), e);
                 }
             }
 
-            log.info("Auto applier completed - Total: {}, Matched: {}, Applied: {}, Skipped: {}",
-                    jobs.size(), matchedCount, appliedCount, skippedCount);
+            log.info("Auto applier completed - Total jobs: {}, Matched: {}, Applied: {}, Skipped: {}",
+                    allJobs.size(), matched.size(), appliedCount, skippedCount);
 
         } catch (Exception e) {
             log.error("Auto applier failed", e);
