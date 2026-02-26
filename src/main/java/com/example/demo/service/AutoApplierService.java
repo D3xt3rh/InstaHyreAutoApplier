@@ -34,8 +34,7 @@ public class AutoApplierService {
             scraperService.initDriver();
 
             if (!config.isUseManualCookies()) {
-                log.error("❌ Automatic login is not supported!");
-                log.error("Please enable cookie-based authentication in application.yml");
+                log.error("❌ Please enable cookie-based authentication in application.yml");
                 return appliedJobs;
             }
 
@@ -49,7 +48,7 @@ public class AutoApplierService {
                     config.getCsrftoken()
             );
 
-            // ── Scrape both sources ──────────────────────────────────────
+            // Scrape both sources
             List<JobDTO> opportunityJobs = scraperService.scrapeJobs();
             log.info("Scraped {} opportunity jobs", opportunityJobs.size());
 
@@ -59,33 +58,23 @@ public class AutoApplierService {
             // Merge, deduplicating by unique key
             Map<String, JobDTO> allJobsMap = new LinkedHashMap<>();
             for (JobDTO j : opportunityJobs) {
-                if (j.getId() != null) {
-                    allJobsMap.put("opp_" + j.getId(), j);
-                }
+                if (j.getId() != null) allJobsMap.put("opp_" + j.getId(), j);
             }
             for (JobDTO j : jobSearchJobs) {
-                if (j.getJobId() != null) {
-                    allJobsMap.putIfAbsent("job_" + j.getJobId(), j);
-                }
+                if (j.getJobId() != null) allJobsMap.putIfAbsent("job_" + j.getJobId(), j);
             }
 
+            // ✅ Apply to ALL jobs — no keyword filtering
             List<JobDTO> allJobs = new ArrayList<>(allJobsMap.values());
-            log.info("Combined: {} opportunity + {} job_search = {} unique total jobs",
-                    opportunityJobs.size(), jobSearchJobs.size(), allJobs.size());
+            log.info("Total unique jobs to apply: {} ({} opportunity + {} job_search)",
+                    allJobs.size(), opportunityJobs.size(), jobSearchJobs.size());
 
-            // ── Filter by keywords ───────────────────────────────────────
-            List<JobDTO> matched = allJobs.stream()
-                    .filter(this::matchesKeywords)
-                    .toList();
-            log.info("Found {} matched jobs after keyword filter", matched.size());
-
-            // ── Apply ────────────────────────────────────────────────────
             int appliedCount = 0;
             int skippedCount = 0;
 
-            for (JobDTO job : matched) {
+            for (JobDTO job : allJobs) {
                 try {
-                    // Build a unique key for dedup tracking
+                    // Unique key per source
                     String uniqueKey = "opportunity".equals(job.getSource())
                             ? "opp_" + job.getId()
                             : "job_" + job.getJobId();
@@ -103,8 +92,8 @@ public class AutoApplierService {
                         job.setApplied(true);
                         appliedJobs.add(job);
                         appliedJobIds.add(uniqueKey);
-                        log.info("✅ Successfully applied to: {} (Total: {})",
-                                job.getTitle(), appliedCount);
+                        log.info("✅ Applied to: {} [{}] (Total: {})",
+                                job.getTitle(), job.getSource(), appliedCount);
                     } else {
                         log.warn("❌ Failed to apply to: {}", job.getTitle());
                     }
@@ -120,8 +109,8 @@ public class AutoApplierService {
                 }
             }
 
-            log.info("Auto applier completed - Total: {}, Matched: {}, Applied: {}, Skipped: {}",
-                    allJobs.size(), matched.size(), appliedCount, skippedCount);
+            log.info("✅ Done - Total: {}, Applied: {}, Skipped: {}",
+                    allJobs.size(), appliedCount, skippedCount);
 
         } catch (Exception e) {
             log.error("Auto applier failed", e);
